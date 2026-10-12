@@ -83,6 +83,8 @@
   .verdict { font-size: 1.4rem; font-weight: 700; margin: 0 0 .25rem; }
   .sub { color: var(--muted); margin: 0 0 1rem; font-size: .9rem; }
   .notice { background: var(--warn-bg); color: var(--warn-ink); border-radius: 6px; padding: .7rem .9rem; font-size: .9rem; margin-bottom: 1rem; }
+  .quota { color: var(--muted); font-size: .85rem; margin: .75rem 0 0; }
+  .limit { margin: 1rem 0 0; }
   .error { color: var(--err); font-weight: 500; margin-top: 1rem; }
   .empty { color: var(--muted); }
   .meta { color: var(--muted); font-size: .8rem; margin-top: 1rem; word-break: break-all; }
@@ -108,6 +110,8 @@
         <button class="primary" id="run" disabled>Clasificar</button>
         <button class="secondary" id="reset" hidden>Cambiar imagen</button>
       </div>
+      <p class="quota" id="quota" hidden></p>
+      <p class="notice limit" id="limit" role="status" hidden></p>
       <p class="error" id="error" role="alert" hidden></p>
     </section>
 
@@ -136,6 +140,8 @@ const STAGES = {
 };
 const $ = id => document.getElementById(id);
 let currentFile = null;
+let blockedUntil = 0;  // ms epoch; 0 = sin bloqueo
+let blockTimer = null;
 
 function setFile(file) {
   if (!file) return;
@@ -146,7 +152,7 @@ function setFile(file) {
   $("preview").src = URL.createObjectURL(file);
   $("preview").hidden = false;
   $("dropText").hidden = true;
-  $("run").disabled = false;
+  $("run").disabled = isBlocked();
   $("reset").hidden = false;
   $("error").hidden = true;
 }
@@ -174,14 +180,65 @@ $("run").addEventListener("click", async () => {
   try {
     const resp = await fetch("/api/classify", { method: "POST", body: form });
     const data = await resp.json().catch(() => ({}));
+    if (resp.status === 429) {
+      block(Number(resp.headers.get("Retry-After")) || 3600);
+      return;
+    }
     if (!resp.ok) throw new Error(data.detail || `Error ${resp.status}`);
     render(data);
+    const remaining = resp.headers.get("X-RateLimit-Remaining");
+    if (remaining === "0") refreshQuota();  // se usó el último intento: el servidor ya bloqueó
+    else if (remaining !== null) showQuota(Number(remaining));
   } catch (err) {
     showError(`No se pudo clasificar la imagen. ${err.message}`);
   } finally {
-    $("run").disabled = false; $("run").textContent = "Clasificar";
+    $("run").textContent = "Clasificar";
+    $("run").disabled = !currentFile || isBlocked();
   }
 });
+
+// --- Límite de uso: el servidor es la fuente de verdad, esto solo informa ---
+let RATE_LIMIT = 3;  // se actualiza con /api/quota
+const isBlocked = () => Date.now() < blockedUntil;
+
+function showQuota(remaining) {
+  $("quota").textContent = remaining === 1
+    ? `Le queda 1 clasificación de ${RATE_LIMIT} en esta hora.`
+    : `Le quedan ${remaining} clasificaciones de ${RATE_LIMIT} en esta hora.`;
+  $("quota").hidden = false;
+}
+
+function block(seconds) {
+  blockedUntil = Date.now() + seconds * 1000;
+  $("quota").hidden = true;
+  $("run").disabled = true;
+  clearInterval(blockTimer);
+  tickBlock();
+  blockTimer = setInterval(tickBlock, 1000);
+}
+
+function tickBlock() {
+  const left = Math.ceil((blockedUntil - Date.now()) / 1000);
+  if (left <= 0) {
+    clearInterval(blockTimer); blockedUntil = 0;
+    $("limit").hidden = true;
+    $("run").disabled = !currentFile;
+    showQuota(RATE_LIMIT);
+    return;
+  }
+  const mm = Math.floor(left / 60), ss = String(left % 60).padStart(2, "0");
+  $("limit").textContent = `Alcanzó el límite de ${RATE_LIMIT} clasificaciones por hora. Podrá volver a intentar en ${mm}:${ss}.`;
+  $("limit").hidden = false;
+}
+
+function refreshQuota() {
+  fetch("/api/quota").then(r => r.json()).then(q => {
+    RATE_LIMIT = q.limit;
+    if (q.retry_after_s > 0) block(q.retry_after_s);
+    else showQuota(q.remaining);
+  }).catch(() => {});
+}
+refreshQuota();
 
 function render(data) {
   const info = STAGES[data.stage] || { label: data.stage ?? "Sin resultado", tissue: "" };
