@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clasificador de estadio de UPP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #F3F5F6;
+    --panel: #FFFFFF;
+    --ink: #22303A;
+    --muted: #5E6B74;
+    --line: #D5DCE0;
+    --action: #2D5B78;
+    --s1: #E9B7AE; /* epidermis */
+    --s2: #D98C84; /* dermis */
+    --s3: #B5585A; /* tejido subcutáneo */
+    --s4: #6E2A35; /* músculo / hueso */
+    --warn-bg: #FFF4DB;
+    --warn-ink: #7A5200;
+    --err: #A3262A;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 2.5rem 1.25rem 3rem; }
+  h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 .4rem; font-weight: 700; }
+  .intro { color: var(--muted); margin: 0 0 2rem; max-width: 60ch; }
+  .grid { display: grid; gap: 1.5rem; grid-template-columns: 1fr 1fr; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 1rem; font-weight: 700; }
+
+  .drop {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 260px; border: 2px dashed var(--line); border-radius: 8px;
+    text-align: center; padding: 1rem; cursor: pointer; color: var(--muted);
+    transition: border-color .15s, background .15s;
+  }
+  .drop.over { border-color: var(--action); background: #EAF1F5; }
+  .drop:focus-visible { outline: 3px solid var(--action); outline-offset: 2px; }
+  .drop img { max-width: 100%; max-height: 320px; border-radius: 6px; display: block; }
+  .drop strong { color: var(--ink); }
+  input[type=file] { display: none; }
+
+  .actions { display: flex; gap: .75rem; margin-top: 1rem; }
+  button {
+    font: inherit; font-weight: 500; border-radius: 6px; padding: .6rem 1.1rem;
+    cursor: pointer; border: 1px solid var(--action);
+  }
+  button.primary { background: var(--action); color: #fff; }
+  button.secondary { background: transparent; color: var(--action); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+  /* Escala de profundidad: cada banda representa una capa de tejido */
+  .depth { border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+  .layer {
+    display: grid; grid-template-columns: 5.5rem 1fr 3.5rem; align-items: center; gap: .75rem;
+    padding: .7rem .9rem; position: relative; color: var(--ink);
+  }
+  .layer[data-stage="stage1"] { background: color-mix(in srgb, var(--s1) 35%, #fff); }
+  .layer[data-stage="stage2"] { background: color-mix(in srgb, var(--s2) 35%, #fff); }
+  .layer[data-stage="stage3"] { background: color-mix(in srgb, var(--s3) 35%, #fff); }
+  .layer[data-stage="stage4"] { background: color-mix(in srgb, var(--s4) 35%, #fff); }
+  .layer.top { outline: 3px solid var(--ink); outline-offset: -3px; }
+  .layer .name { font-weight: 700; }
+  .layer .tissue { display: block; font-size: .8rem; font-weight: 400; color: var(--muted); }
+  .bar { height: 10px; background: rgba(255,255,255,.7); border-radius: 5px; overflow: hidden; }
+  .bar span { display: block; height: 100%; width: 0; transition: width .5s ease-out; }
+  .layer[data-stage="stage1"] .bar span { background: var(--s1); }
+  .layer[data-stage="stage2"] .bar span { background: var(--s2); }
+  .layer[data-stage="stage3"] .bar span { background: var(--s3); }
+  .layer[data-stage="stage4"] .bar span { background: var(--s4); }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; font-size: .9rem; }
+
+  .verdict { font-size: 1.4rem; font-weight: 700; margin: 0 0 .25rem; }
+  .sub { color: var(--muted); margin: 0 0 1rem; font-size: .9rem; }
+  .notice { background: var(--warn-bg); color: var(--warn-ink); border-radius: 6px; padding: .7rem .9rem; font-size: .9rem; margin-bottom: 1rem; }
+  .error { color: var(--err); font-weight: 500; margin-top: 1rem; }
+  .empty { color: var(--muted); }
+  .meta { color: var(--muted); font-size: .8rem; margin-top: 1rem; word-break: break-all; }
+  footer { color: var(--muted); font-size: .85rem; margin-top: 2rem; max-width: 70ch; }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Clasificador de estadio de úlcera por presión</h1>
+  <p class="intro">Suba una foto de la lesión. El modelo estima el estadio (1 a 4) y muestra el score de cada clase.</p>
+
+  <div class="grid">
+    <section class="panel" aria-labelledby="h-img">
+      <h2 id="h-img">Imagen</h2>
+      <label class="drop" id="drop" tabindex="0" for="file">
+        <span id="dropText"><strong>Seleccione una imagen</strong><br>o arrástrela aquí. JPG, PNG o WEBP, hasta 10 MB.</span>
+        <img id="preview" alt="Vista previa de la imagen" hidden>
+      </label>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp">
+      <div class="actions">
+        <button class="primary" id="run" disabled>Clasificar</button>
+        <button class="secondary" id="reset" hidden>Cambiar imagen</button>
+      </div>
+      <p class="error" id="error" role="alert" hidden></p>
+    </section>
+
+    <section class="panel" aria-labelledby="h-res" aria-live="polite">
+      <h2 id="h-res">Resultado</h2>
+      <p class="empty" id="empty">El resultado aparece aquí después de clasificar una imagen.</p>
+      <div id="result" hidden>
+        <p class="verdict" id="verdict"></p>
+        <p class="sub" id="sub"></p>
+        <p class="notice" id="lowconf" hidden>Ninguna clase supera el umbral del modelo. El estadio indicado es la clase con mayor score, no una predicción confiable.</p>
+        <div class="depth" id="depth"></div>
+        <p class="meta" id="meta"></p>
+      </div>
+    </section>
+  </div>
+
+  <footer>Herramienta de investigación. No reemplaza la evaluación de un profesional de la salud.</footer>
+</main>
+
+<script>
+const STAGES = {
+  stage1: { label: "Estadio 1", tissue: "Piel intacta, eritema" },
+  stage2: { label: "Estadio 2", tissue: "Pérdida parcial de dermis" },
+  stage3: { label: "Estadio 3", tissue: "Pérdida total de piel" },
+  stage4: { label: "Estadio 4", tissue: "Exposición de músculo o hueso" },
+};
+const $ = id => document.getElementById(id);
+let currentFile = null;
+
+function setFile(file) {
+  if (!file) return;
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    showError("Formato no soportado. Use JPG, PNG o WEBP."); return;
+  }
+  currentFile = file;
+  $("preview").src = URL.createObjectURL(file);
+  $("preview").hidden = false;
+  $("dropText").hidden = true;
+  $("run").disabled = false;
+  $("reset").hidden = false;
+  $("error").hidden = true;
+}
+
+function showError(msg) { $("error").textContent = msg; $("error").hidden = false; }
+
+const drop = $("drop");
+$("file").addEventListener("change", e => setFile(e.target.files[0]));
+drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } });
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => setFile(e.dataTransfer.files[0]));
+
+$("reset").addEventListener("click", () => {
+  currentFile = null; $("file").value = "";
+  $("preview").hidden = true; $("dropText").hidden = false;
+  $("run").disabled = true; $("reset").hidden = true;
+  $("result").hidden = true; $("empty").hidden = false; $("error").hidden = true;
+});
+
+$("run").addEventListener("click", async () => {
+  if (!currentFile) return;
+  $("run").disabled = true; $("run").textContent = "Clasificando…"; $("error").hidden = true;
+  const form = new FormData(); form.append("file", currentFile);
+  try {
+    const resp = await fetch("/api/classify", { method: "POST", body: form });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `Error ${resp.status}`);
+    render(data);
+  } catch (err) {
+    showError(`No se pudo clasificar la imagen. ${err.message}`);
+  } finally {
+    $("run").disabled = false; $("run").textContent = "Clasificar";
+  }
+});
+
+function render(data) {
+  const info = STAGES[data.stage] || { label: data.stage ?? "Sin resultado", tissue: "" };
+  const top = data.scores.find(s => s.stage === data.stage);
+  $("verdict").textContent = data.confident ? info.label : `${info.label} (baja confianza)`;
+  $("sub").textContent = top ? `Score: ${(top.confidence * 100).toFixed(1)} %` : "";
+  $("lowconf").hidden = data.confident;
+
+  // Orden fijo 1 → 4 para leer la escala como profundidad de tejido
+  const byStage = Object.fromEntries(data.scores.map(s => [s.stage, s.confidence]));
+  $("depth").innerHTML = Object.keys(STAGES).map(k => `
+    <div class="layer ${k === data.stage ? "top" : ""}" data-stage="${k}">
+      <span class="name">${STAGES[k].label}<span class="tissue">${STAGES[k].tissue}</span></span>
+      <div class="bar"><span data-w="${((byStage[k] ?? 0) * 100).toFixed(1)}"></span></div>
+      <span class="pct">${((byStage[k] ?? 0) * 100).toFixed(1)} %</span>
+    </div>`).join("");
+  requestAnimationFrame(() => document.querySelectorAll(".bar span").forEach(b => b.style.width = b.dataset.w + "%"));
+
+  $("meta").textContent = `Modelo: ${data.model_id ?? "—"} · Inferencia: ${data.inference_id ?? "—"}`;
+  $("empty").hidden = true; $("result").hidden = false;
+}
+</script>
+</body>
+</html>
