@@ -4,8 +4,9 @@ import math
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from inference_sdk import InferenceConfiguration, InferenceHTTPClient
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -14,8 +15,21 @@ from dotenv import load_dotenv
 load_dotenv('../.env')
 
 ROBOFLOW_API_URL = os.getenv("API_URL", "https://serverless.roboflow.com")
-ROBOFLOW_API_KEY = os.environ["API_KEY"]  # nunca se expone al navegador
-MODEL_ID = os.getenv("API_MODEL")
+ROBOFLOW_API_KEY = os.getenv("API_KEY")
+# Modelos disponibles: clave -> (nombre visible, variable de entorno con el MODEL_ID de Roboflow).
+# Los que no tengan la variable definida no se ofrecen en el front.
+MODEL_DEFS = {
+    "resnet18": ("ResNet18", "MODEL_RESNET18"),
+    "resnet50": ("ResNet50", "MODEL_RESNET50"),
+    "vit": ("ViT", "MODEL_VIT"),
+}
+MODELS = {
+    key: {"label": label, "model_id": os.getenv(env)}
+    for key, (label, env) in MODEL_DEFS.items()
+    if os.getenv(env)
+}
+if not MODELS:
+    raise RuntimeError("Definir al menos una de: " + ", ".join(env for _, env in MODEL_DEFS.values()))
 MAX_BYTES = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # inferencias por IP...
@@ -116,6 +130,11 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/models")
+def models():
+    return [{"key": key, "label": m["label"]} for key, m in MODELS.items()]
+
+
 @app.get("/api/quota")
 def quota(request: Request):
     remaining, retry_after = limiter.status(client_ip(request))
@@ -124,7 +143,17 @@ def quota(request: Request):
 
 # Endpoint sync (def): el SDK es bloqueante y FastAPI lo ejecuta en un threadpool.
 @app.post("/api/classify")
-def classify(request: Request, response: Response, file: UploadFile = File(...)):
+def classify(
+    request: Request,
+    response: Response,
+    file: UploadFile = File(...),
+    models: list[str] = Form(...),
+):
+    selected = list(dict.fromkeys(models))  # sin duplicados, respetando el orden
+    unknown = [m for m in selected if m not in MODELS]
+    if not selected or unknown:
+        raise HTTPException(400, f"Modelo no disponible: {', '.join(unknown) or '(ninguno)'}.")
+
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(415, "Formato no soportado. Use JPG, PNG o WEBP.")
 
@@ -141,16 +170,31 @@ def classify(request: Request, response: Response, file: UploadFile = File(...))
         raise HTTPException(400, "El archivo no es una imagen válida.") from exc
 
     # Solo cuenta como intento lo que llega a Roboflow (las validaciones de arriba no gastan crédito).
+    # Una clasificación = una imagen, sin importar cuántos modelos se elijan.
     ip = client_ip(request)
     remaining = limiter.acquire(ip)
-    try:
-        raw = client.infer(image, model_id=MODEL_ID)
-    except Exception as exc:  # el SDK lanza varios tipos de error HTTP
+
+    def run(key: str) -> dict:
+        model = MODELS[key]
+        base = {"key": key, "label": model["label"]}
+        try:
+            raw = client.infer(image, model_id=model["model_id"])
+            return {**base, **parse_result(raw, model["model_id"])}
+        except HTTPException as exc:
+            return {**base, "error": exc.detail}
+        except Exception as exc:  # el SDK lanza varios tipos de error HTTP
+            return {**base, "error": f"Error de Roboflow: {exc}"}
+
+    # La misma imagen va a cada modelo en paralelo.
+    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        results = list(pool.map(run, selected))
+
+    if all("error" in r for r in results):
         limiter.release(ip)
-        raise HTTPException(502, f"Error de Roboflow: {exc}") from exc
+        raise HTTPException(502, "; ".join(f"{r['label']}: {r['error']}" for r in results))
 
     response.headers["X-RateLimit-Remaining"] = str(remaining)
-    return parse_result(raw)
+    return {"results": results}
 
 
 def extract_block(raw) -> dict:
@@ -162,7 +206,7 @@ def extract_block(raw) -> dict:
     return raw
 
 
-def parse_result(raw) -> dict:
+def parse_result(raw, model_id: str) -> dict:
     try:
         block = extract_block(raw)
         preds = block["predictions"]
@@ -195,7 +239,7 @@ def parse_result(raw) -> dict:
         "scores": scores,
         "predicted_classes": predicted,
         "inference_id": block.get("inference_id"),
-        "model_id": (block.get("resolved_model") or {}).get("model_id", MODEL_ID),
+        "model_id": (block.get("resolved_model") or {}).get("model_id", model_id),
         "inference_time_s": block.get("time"),
     }
 

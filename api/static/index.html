@@ -49,6 +49,26 @@
   .drop strong { color: var(--ink); }
   input[type=file] { display: none; }
 
+  .models { border: 0; padding: 0; margin: 1rem 0 0; }
+  .models legend { font-weight: 700; font-size: .9rem; padding: 0; margin-bottom: .4rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .chip { position: relative; }
+  .chip input { position: absolute; opacity: 0; pointer-events: none; }
+  .chip span {
+    display: inline-block; padding: .35rem .8rem; border: 1px solid var(--line); border-radius: 999px;
+    cursor: pointer; font-size: .9rem; user-select: none; transition: background .15s, border-color .15s;
+  }
+  .chip input:checked + span { background: var(--action); border-color: var(--action); color: #fff; }
+  .chip input:focus-visible + span { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line); margin: 0 0 1rem; }
+  .tab {
+    border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none;
+    color: var(--muted); padding: .45rem .8rem; margin-bottom: -1px;
+  }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--action); font-weight: 700; }
+  .tab .mini { display: block; font-size: .75rem; font-weight: 400; color: var(--muted); }
+
   .actions { display: flex; gap: .75rem; margin-top: 1rem; }
   button {
     font: inherit; font-weight: 500; border-radius: 6px; padding: .6rem 1.1rem;
@@ -106,6 +126,10 @@
         <img id="preview" alt="Vista previa de la imagen" hidden>
       </label>
       <input type="file" id="file" accept="image/jpeg,image/png,image/webp">
+      <fieldset class="models">
+        <legend>Modelos</legend>
+        <div class="chips" id="models"></div>
+      </fieldset>
       <div class="actions">
         <button class="primary" id="run" disabled>Clasificar</button>
         <button class="secondary" id="reset" hidden>Cambiar imagen</button>
@@ -118,6 +142,8 @@
     <section class="panel" aria-labelledby="h-res" aria-live="polite">
       <h2 id="h-res">Resultado</h2>
       <p class="empty" id="empty">El resultado aparece aquí después de clasificar una imagen.</p>
+      <div class="tabs" id="tabs" role="tablist" aria-label="Modelo" hidden></div>
+      <p class="error" id="modelError" hidden></p>
       <div id="result" hidden>
         <p class="verdict" id="verdict"></p>
         <p class="sub" id="sub"></p>
@@ -142,6 +168,18 @@ const $ = id => document.getElementById(id);
 let currentFile = null;
 let blockedUntil = 0;  // ms epoch; 0 = sin bloqueo
 let blockTimer = null;
+let results = [];      // un resultado por modelo, en el orden de los chips
+let activeKey = null;  // modelo visible en el panel de resultado
+
+const selectedModels = () => [...document.querySelectorAll("#models input:checked")].map(i => i.value);
+const canRun = () => !!currentFile && !isBlocked() && selectedModels().length > 0;
+
+fetch("/api/models").then(r => r.json()).then(models => {
+  $("models").innerHTML = models.map((m, i) => `
+    <label class="chip"><input type="checkbox" value="${m.key}" ${i === 0 ? "checked" : ""}><span>${m.label}</span></label>`).join("");
+  $("models").addEventListener("change", () => { $("run").disabled = !canRun(); });
+  $("run").disabled = !canRun();
+}).catch(() => showError("No se pudo cargar la lista de modelos."));
 
 function setFile(file) {
   if (!file) return;
@@ -152,7 +190,7 @@ function setFile(file) {
   $("preview").src = URL.createObjectURL(file);
   $("preview").hidden = false;
   $("dropText").hidden = true;
-  $("run").disabled = isBlocked();
+  $("run").disabled = !canRun();
   $("reset").hidden = false;
   $("error").hidden = true;
 }
@@ -170,13 +208,15 @@ $("reset").addEventListener("click", () => {
   currentFile = null; $("file").value = "";
   $("preview").hidden = true; $("dropText").hidden = false;
   $("run").disabled = true; $("reset").hidden = true;
-  $("result").hidden = true; $("empty").hidden = false; $("error").hidden = true;
+  $("result").hidden = true; $("tabs").hidden = true; $("modelError").hidden = true;
+  $("empty").hidden = false; $("error").hidden = true;
 });
 
 $("run").addEventListener("click", async () => {
   if (!currentFile) return;
   $("run").disabled = true; $("run").textContent = "Clasificando…"; $("error").hidden = true;
   const form = new FormData(); form.append("file", currentFile);
+  selectedModels().forEach(m => form.append("models", m));
   try {
     const resp = await fetch("/api/classify", { method: "POST", body: form });
     const data = await resp.json().catch(() => ({}));
@@ -185,7 +225,10 @@ $("run").addEventListener("click", async () => {
       return;
     }
     if (!resp.ok) throw new Error(data.detail || `Error ${resp.status}`);
-    render(data);
+    results = data.results;
+    if (!results.some(r => r.key === activeKey)) activeKey = (results.find(r => !r.error) || results[0]).key;
+    renderTabs();
+    render();
     const remaining = resp.headers.get("X-RateLimit-Remaining");
     if (remaining === "0") refreshQuota();  // se usó el último intento: el servidor ya bloqueó
     else if (remaining !== null) showQuota(Number(remaining));
@@ -193,7 +236,7 @@ $("run").addEventListener("click", async () => {
     showError(`No se pudo clasificar la imagen. ${err.message}`);
   } finally {
     $("run").textContent = "Clasificar";
-    $("run").disabled = !currentFile || isBlocked();
+    $("run").disabled = !canRun();
   }
 });
 
@@ -222,7 +265,7 @@ function tickBlock() {
   if (left <= 0) {
     clearInterval(blockTimer); blockedUntil = 0;
     $("limit").hidden = true;
-    $("run").disabled = !currentFile;
+    $("run").disabled = !canRun();
     showQuota(RATE_LIMIT);
     return;
   }
@@ -240,11 +283,38 @@ function refreshQuota() {
 }
 refreshQuota();
 
-function render(data) {
+const pct = x => `${(x * 100).toFixed(1)} %`;
+
+function renderTabs() {
+  $("tabs").hidden = results.length < 2;
+  $("tabs").innerHTML = results.map(r => {
+    const top = r.error ? null : r.scores.find(s => s.stage === r.stage);
+    const mini = r.error ? "Error" : `${STAGES[r.stage]?.label ?? r.stage ?? "—"}${top ? " · " + pct(top.confidence) : ""}`;
+    return `<button class="tab" role="tab" data-key="${r.key}" aria-selected="${r.key === activeKey}">${r.label}<span class="mini">${mini}</span></button>`;
+  }).join("");
+}
+
+$("tabs").addEventListener("click", e => {
+  const tab = e.target.closest(".tab");
+  if (!tab) return;
+  activeKey = tab.dataset.key;
+  $("tabs").querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t === tab));
+  render();
+});
+
+function render() {
+  const data = results.find(r => r.key === activeKey);
+  $("empty").hidden = true;
+  if (data.error) {
+    $("result").hidden = true;
+    $("modelError").textContent = `${data.label}: ${data.error}`; $("modelError").hidden = false;
+    return;
+  }
+  $("modelError").hidden = true;
   const info = STAGES[data.stage] || { label: data.stage ?? "Sin resultado", tissue: "" };
   const top = data.scores.find(s => s.stage === data.stage);
   $("verdict").textContent = data.confident ? info.label : `${info.label} (baja confianza)`;
-  $("sub").textContent = top ? `Score: ${(top.confidence * 100).toFixed(1)} %` : "";
+  $("sub").textContent = `${data.label}${top ? ` · Score: ${pct(top.confidence)}` : ""}`;
   $("lowconf").hidden = data.confident;
 
   // Orden fijo 1 → 4 para leer la escala como profundidad de tejido
@@ -258,7 +328,7 @@ function render(data) {
   requestAnimationFrame(() => document.querySelectorAll(".bar span").forEach(b => b.style.width = b.dataset.w + "%"));
 
   $("meta").textContent = `Modelo: ${data.model_id ?? "—"} · Inferencia: ${data.inference_id ?? "—"}`;
-  $("empty").hidden = true; $("result").hidden = false;
+  $("result").hidden = false;
 }
 </script>
 </body>
