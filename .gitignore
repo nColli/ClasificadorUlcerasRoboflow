@@ -1,0 +1,5 @@
+.venv
+.env
+*.jpeg
+*.jpeg
+*.png
